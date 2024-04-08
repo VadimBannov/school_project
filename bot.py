@@ -1,13 +1,18 @@
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 import time
-from config import *
-from gpt import GPT
+from gpt import (
+    create_system_prompt,
+    ask_gpt,
+    user_data,
+    user_collection
+)
 from database import *
+from config import *
+
 
 # Токен и класс GPT
 bot = telebot.TeleBot(BOT_TOKEN)
-gpt = GPT()
 
 # Создания таблицы и проверка
 prepare_db()
@@ -35,24 +40,44 @@ def debug_command(message):
         bot.send_document(message.chat.id, f)
 
 
-@bot.message_handler(commands=["history"])
+@bot.message_handler(commands=["request_history"])
 @bot.message_handler(func=lambda message: "История запросов" in message.text)
 def command_history(message):
     user_id = message.from_user.id
-    history = get_data_for_user(user_id)
-    if history:
-        history_text = f"{history['timestamp']}:  ({history['task']})  -  ({history['answer']})"
-        bot.send_message(message.chat.id, f"Ваша история запросов:\n{history_text}")
+
+    user_all_history = get_history_and_date(user_id)
+
+    if user_all_history:
+        history_text = ""
+        for history_item in user_all_history:
+            history_text += f"{history_item['date']}: ({history_item['content']})\n"
+        bot.send_message(message.chat.id, f"Ваши все истории подарков:\n{history_text}")
     else:
         bot.send_message(message.chat.id, "У вас нет истории запросов.")
+
+    return
 
 
 @bot.message_handler(commands=["start"])
 def start_command(message):
     user_name, user_id = message.from_user.first_name, message.from_user.id
-    if is_value_in_table(DB_TABLE_USERS_NAME, "user_id", user_id):
-        delete_user(user_id)
-    insert_row([user_id, 'null', 'null', 'null', 'null', 'null', "null"])
+
+    if not is_value_in_table(DB_TABLE_USERS_NAME, "user_id", user_id):
+        insert_row(
+            [
+                user_id,
+                None,
+                None,
+                None
+            ]
+        )
+
+    if user_id not in user_data:
+        user_data[user_id] = {
+            'holiday': None,
+            'recipient': None,
+            'age': None,
+        }
     bot.send_photo(message.chat.id, LINK_IMAGE[0], f"Здравствуй {user_name}! Вас приветствует бот «Мир "
                                                    f"подарков». Чтобы бот написал ваш подарок, "
                                                    f"вам необходимо указать некоторые параметры. Или можно посмотреть "
@@ -83,9 +108,8 @@ def help_command(message):
                                        "выбрав один из предложенных диапазонов возраста.\n\n"
                                        "Получение рекомендации: Бот сгенерирует рекомендацию подарка на основе "
                                        "выбранных вами параметров.\n\n"
-                                       "Продолжить: После получения ответа, если вы заметили, что бот не дописал "
-                                       "полностью ответ, вы можете нажать кнопку «Продолжить», и тогда бот допишет "
-                                       "его, и вы сможете увидеть ответ полностью.\n\n"
+                                       "Пересоздать: После получения ответа, если вас не устроил ответ, вы сможете его "
+                                       "пересоздать.\n\n"
                                        "Завершение диалога: По завершении диалога вы можете начать новый диалог или "
                                        "запросить историю предыдущих запросов с помощью соответствующих кпонок.\n"
                                        "——————————————————————",
@@ -132,40 +156,38 @@ def command_help_with_holiday(message):
 
 @bot.message_handler(commands=["help_with_recipient"])
 def command_help_with_recipient(message):
+    user_id = message.from_user.id
+
+    if user_id not in user_data:
+        start_command(message)
+        return
+    elif user_data[user_id]["holiday"] is None:
+        command_help_with_holiday(message)
+        return
+
     bot.send_message(message.chat.id, "Выберите кому вы хотите подарить подарок: ",
                      reply_markup=create_markup(["Ребенку", "Родителям", "Родственнику", "Другу/подруге"]))
     bot.register_next_step_handler(message, processing_selected_recipient)
     return
 
 
-@bot.message_handler(commands=['continue_explaining'])
-@bot.message_handler(func=lambda message: "Продолжить" in message.text)
+@bot.message_handler(commands=['recreate_explaining'])
+@bot.message_handler(func=lambda message: "Пересоздать" in message.text)
 def continue_commands(message):
-    if (is_value_in_table(DB_TABLE_USERS_NAME, "holiday", "null") or
-            is_value_in_table(DB_TABLE_USERS_NAME, "recipient", "null") or
-            is_value_in_table(DB_TABLE_USERS_NAME, "age", "null") or
-            is_value_in_table(DB_TABLE_USERS_NAME, "task", "null")):
-        if is_value_in_table(DB_TABLE_USERS_NAME, "holiday", "null"):
-            bot.send_message(message.chat.id, "Сначала выберите праздник: ",
-                             reply_markup=create_markup(["День рождения", "Новый год", "14 февраля", "23 февраля"]))
-            bot.register_next_step_handler(message, processing_selected_holiday)
-            return
-        elif is_value_in_table(DB_TABLE_USERS_NAME, "recipient", "null"):
-            bot.send_message(message.chat.id, "Сначала выберите кому вы хотите подарить подарок: ",
-                             reply_markup=create_markup(["Ребенку", "Родителям", "Родственнику", "Другу/подруге"]))
-            bot.register_next_step_handler(message, processing_selected_recipient)
-            return
-        elif is_value_in_table(DB_TABLE_USERS_NAME, " age", "null"):
-            bot.send_message(message.chat.id,
-                             "Сначала укажите возраст человека, которому вы хотите подарить подарок:",
-                             reply_markup=create_markup(["Младше 12", "12-18", "18-24", "Старше 24"]))
-            bot.register_next_step_handler(message, indication_age)
-            return
-        else:
-            bot.send_message(message.chat.id, "Сначала необходимо указать некоторые параметры ")
-            bot.register_next_step_handler(message, start_command)
-            return
+    user_id = message.from_user.id
+
+    if user_id not in user_data:
+        start_command(message)
+        return
+    elif user_data[user_id]["holiday"] is None:
+        command_help_with_holiday(message)
+        return
+    elif user_data[user_id]["recipient"] is None:
+        command_help_with_recipient(message)
+        return
+
     bot.send_message(message.chat.id, "Подождите чутка", reply_markup=ReplyKeyboardRemove())
+    time.sleep(2)
     generating_gift(message)
     return
 
@@ -173,30 +195,24 @@ def continue_commands(message):
 @bot.message_handler(commands=['end_dialog'])
 @bot.message_handler(func=lambda message: "Завершить" in message.text)
 def end_task_commands(message):
-    if (is_value_in_table(DB_TABLE_USERS_NAME, "holiday", "null") or
-            is_value_in_table(DB_TABLE_USERS_NAME, "recipient", "null") or
-            is_value_in_table(DB_TABLE_USERS_NAME, "age", "null") or
-            is_value_in_table(DB_TABLE_USERS_NAME, "task", "null")):
-        if is_value_in_table(DB_TABLE_USERS_NAME, "holiday", "null"):
-            bot.send_message(message.chat.id, "Сначала выберите праздник: ",
-                             reply_markup=create_markup(["День рождения", "Новый год", "14 февраля", "23 февраля"]))
-            bot.register_next_step_handler(message, processing_selected_holiday)
-            return
-        elif is_value_in_table(DB_TABLE_USERS_NAME, "recipient", "null"):
-            bot.send_message(message.chat.id, "Сначала выберите кому вы хотите подарить подарок: ",
-                             reply_markup=create_markup(["Ребенку", "Родителям", "Родственнику", "Другу/подруге"]))
-            bot.register_next_step_handler(message, processing_selected_recipient)
-            return
-        elif is_value_in_table(DB_TABLE_USERS_NAME, " age", "null"):
-            bot.send_message(message.chat.id,
-                             "Сначала укажите возраст человека, которому вы хотите подарить подарок:",
-                             reply_markup=create_markup(["Младше 12", "12-18", "18-24", "Старше 24"]))
-            bot.register_next_step_handler(message, indication_age)
-            return
-        else:
-            bot.send_message(message.chat.id, "Сначала необходимо указать некоторые параметры ")
-            bot.register_next_step_handler(message, start_command)
-            return
+    user_id = message.from_user.id
+
+    if user_id not in user_data:
+        start_command(message)
+        return
+    elif user_data[user_id]["holiday"] is None:
+        command_help_with_holiday(message)
+        return
+    elif user_data[user_id]["recipient"] is None:
+        command_help_with_recipient(message)
+        return
+
+    user_data[user_id] = {
+        'genre': None,
+        'character': None,
+        'setting': None,
+        'additional_info': ''
+    }
     time.sleep(2)
     bot.send_message(message.chat.id, "Текущий диалог завершено",
                      reply_markup=ReplyKeyboardRemove())
@@ -207,14 +223,19 @@ def end_task_commands(message):
 @bot.message_handler()
 def processing_selected_holiday(message):
     message_text, user_id = message.text, message.from_user.id
+
+    if user_id not in user_data:
+        start_command(message)
+        return
+
     if message_text == "День рождения":
-        update_row_value(user_id, "holiday", "birthday")
+        user_data[user_id]["holiday"] = "День рождения"
     elif message_text == "Новый год":
-        update_row_value(user_id, "holiday", "new year")
+        user_data[user_id]["holiday"] = "Новый год"
     elif message_text == "14 февраля":
-        update_row_value(user_id, "holiday", "14th february")
+        user_data[user_id]["holiday"] = "14 февраля"
     elif message_text == "23 февраля":
-        update_row_value(user_id, "holiday", "23th february")
+        user_data[user_id]["holiday"] = "23 февраля"
     elif message_text == "⟵":
         start_command(message)
         return
@@ -228,22 +249,25 @@ def processing_selected_holiday(message):
 
 def processing_selected_recipient(message):
     message_text, user_id = message.text, message.from_user.id
-    if is_value_in_table(DB_TABLE_USERS_NAME, "holiday", "null"):
-        bot.send_message(message.chat.id, "Сначала выберите праздник: ",
-                         reply_markup=create_markup(["День рождения", "Новый год", "14 февраля", "23 февраля"]))
-        bot.register_next_step_handler(message, processing_selected_holiday)
+
+    if user_id not in user_data:
+        start_command(message)
         return
+    elif user_data[user_id]["holiday"] is None:
+        command_help_with_holiday(message)
+        return
+
     if message_text == "Ребенку":
-        update_row_value(user_id, "recipient", "child")
+        user_data[user_id]["recipient"] = "Ребенку"
         subclass_parameters = ["Мальчику", "Девочке", "Назад"]
     elif message_text == "Родителям":
-        update_row_value(user_id, "recipient", "parents")
+        user_data[user_id]["recipient"] = "Родителям"
         subclass_parameters = ["Маме", "Папе", "Назад"]
     elif message_text == "Родственнику":
-        update_row_value(user_id, "recipient", "relative")
-        subclass_parameters = ["Бабушке", "Дедушке", "Тёти", "Дяди", "Назад"]
+        user_data[user_id]["recipient"] = "Родственнику"
+        subclass_parameters = ["Бабушке", "Дедушке", "Тёте", "Дяде", "Назад"]
     elif message_text == "Другу/подруге":
-        update_row_value(user_id, "recipient", "friend or girlfriend")
+        user_data[user_id]["recipient"] = "Другу/подруге"
         subclass_parameters = ["Другу", "Подруге", "Назад"]
     elif message_text == "Назад":
         command_help_with_holiday(message)
@@ -251,50 +275,56 @@ def processing_selected_recipient(message):
     else:
         bot.send_message(message.chat.id, "Я не понял вашего действия, выберите клавиатурную кнопку!")
         return
-    bot.send_message(message.chat.id, "А именно?", reply_markup=create_markup(subclass_parameters))
+
+    bot.send_message(message.chat.id, "А кому именно?", reply_markup=create_markup(subclass_parameters))
     bot.register_next_step_handler(message, internal_verification)
 
 
 def internal_verification(message):
     message_text, user_id = message.text, message.from_user.id
+
+    if user_id not in user_data:
+        start_command(message)
+        return
+    elif user_data[user_id]["holiday"] is None:
+        command_help_with_holiday(message)
+        return
+    elif user_data[user_id]["recipient"] is None:
+        command_help_with_recipient(message)
+        return
+
     if message_text == "Мальчику":
-        update_row_value(user_id, "recipient", "boy")
+        user_data[user_id]["recipient"] = "Мальчику"
     elif message_text == "Девочке":
-        update_row_value(user_id, "recipient", "girl")
+        user_data[user_id]["recipient"] = "Девочке"
     elif message_text == "Маме":
-        update_row_value(user_id, "recipient", "mom")
-        update_row_value(user_id, "age", "not necessary")
+        user_data[user_id]["recipient"] = "Маме"
         confirming_message(message)
         return
     elif message_text == "Папе":
-        update_row_value(user_id, "recipient", "dad")
-        update_row_value(user_id, "age", "not necessary")
+        user_data[user_id]["recipient"] = "Папе"
         confirming_message(message)
         return
     elif message_text == "Бабушке":
-        update_row_value(user_id, "recipient", "grandmother")
-        update_row_value(user_id, "age", "not necessary")
+        user_data[user_id]["recipient"] = "Бабушке"
         confirming_message(message)
         return
     elif message_text == "Дедушке":
-        update_row_value(user_id, "recipient", "grandfather")
-        update_row_value(user_id, "age", "not necessary")
+        user_data[user_id]["recipient"] = "Дедушке"
         confirming_message(message)
         return
-    elif message_text == "Тёти":
-        update_row_value(user_id, "recipient", "aunt")
-        update_row_value(user_id, "age", "not necessary")
+    elif message_text == "Тёте":
+        user_data[user_id]["recipient"] = "Тёте"
         confirming_message(message)
         return
-    elif message_text == "Дяди":
-        update_row_value(user_id, "recipient", "uncle")
-        update_row_value(user_id, "age", "not necessary")
+    elif message_text == "Дяде":
+        user_data[user_id]["recipient"] = "Дяде"
         confirming_message(message)
         return
     elif message_text == "Другу":
-        update_row_value(user_id, "recipient", "friend")
+        user_data[user_id]["recipient"] = "Другу"
     elif message_text == "Подруге":
-        update_row_value(user_id, "recipient", "girlfriend")
+        user_data[user_id]["recipient"] = "Подруге"
     elif message_text == "Назад":
         bot.send_message(message.chat.id, "Выберите кому вы хотите подарить подарок: ",
                          reply_markup=create_markup(["Ребенку", "Родителям", "Родственнику", "Другу/подруге", "Назад"]))
@@ -303,29 +333,40 @@ def internal_verification(message):
     else:
         bot.send_message(message.chat.id, "Я не понял вашего действия, выберите клавиатурную кнопку!")
         return
+
     bot.send_photo(message.chat.id, LINK_IMAGE[2],
                    "Укажите возраст человека, которому вы хотите подарить подарок: ",
-                   reply_markup=create_markup(["Младше 12", "12-18", "18-24", "Старше 24", "Назад"]))
+                   reply_markup=create_markup(["Младше 12", "От 12 до 18", "От 18 до 24", "Старше 24", "Назад"]))
     bot.register_next_step_handler(message, indication_age)
 
 
 def indication_age(message):
     message_text, user_id = message.text, message.from_user.id
+
+    if user_id not in user_data:
+        start_command(message)
+        return
+    elif user_data[user_id]["holiday"] is None:
+        command_help_with_holiday(message)
+        return
+    elif user_data[user_id]["recipient"] is None:
+        command_help_with_recipient(message)
+        return
+
     if message_text == "Младше 12":
-        update_row_value(user_id, "age", "under 12")
-    elif message_text == "12-18":
-        update_row_value(user_id, "age", "from 12 to 18")
-    elif message_text == "18-24":
-        update_row_value(user_id, "age", "from 18 to 24")
+        user_data[user_id]["age"] = "Младше 12"
+    elif message_text == "От 12 до 18":
+        user_data[user_id]["age"] = "От 12 до 18"
+    elif message_text == "От 18 до 24":
+        user_data[user_id]["age"] = "От 18 до 24"
     elif message_text == "Старше 24":
-        update_row_value(user_id, "age", "older 24")
+        user_data[user_id]["age"] = "Старше 24"
     elif message_text == "Назад":
-        if get_data_for_user(user_id)["recipient"] == "boy" or get_data_for_user(user_id)["recipient"] == "girl":
-            bot.send_message(message.chat.id, "А именно?",
+        if get_data_for_user(user_id)["recipient"] in ["Мальчику", "Девочке"]:
+            bot.send_message(message.chat.id, "А кому именно?",
                              reply_markup=create_markup(["Мальчику", "Девочке", "Назад"]))
-        elif (get_data_for_user(user_id)["recipient"] == "friend" or
-              get_data_for_user(user_id)["recipient"] == "girlfriend"):
-            bot.send_message(message.chat.id, "А именно?",
+        elif get_data_for_user(user_id)["recipient"] in ["Другу", "Подруге"]:
+            bot.send_message(message.chat.id, "А кому именно?",
                              reply_markup=create_markup(["Другу", "Подруге", "Назад"]))
         else:
             bot.send_message(message.chat.id, "Выберите кому вы хотите подарить подарок: ",
@@ -337,50 +378,26 @@ def indication_age(message):
         return
     else:
         bot.send_message(message.chat.id, "Я не понял вашего действия, выберите клавиатурную кнопку!")
+
     confirming_message(message)
 
 
 def confirming_message(message):
     message_text, user_id = message.text, message.from_user.id
-    res, second_res, third_res = (get_data_for_user(user_id)['holiday'],
-                                  get_data_for_user(user_id)['recipient'], get_data_for_user(user_id)['age'])
-    if res == "birthday":
-        holiday = "День рождения"
-    elif res == "new year":
-        holiday = "Новый год"
-    elif res == "14th february":
-        holiday = "14 февраля"
-    else:
-        holiday = "23 февраля"
-    if second_res == "boy":
-        recipient = "Мальчику"
-    elif second_res == "girl":
-        recipient = "Девочке"
-    elif second_res == "mom":
-        recipient = "Маме"
-    elif second_res == "dad":
-        recipient = "Папе"
-    elif second_res == "grandmother":
-        recipient = "Бабушке"
-    elif second_res == "grandfather":
-        recipient = "Дедушке"
-    elif second_res == "aunt":
-        recipient = "Тёти"
-    elif second_res == "uncle":
-        recipient = "Дяди"
-    elif second_res == "friend":
-        recipient = "Другу"
-    else:
-        recipient = "Подруге"
-    if third_res == "under 12":
-        age = "Младше 12"
-    elif third_res == "from 12 to 18":
-        age = "12-18"
-    elif third_res == "from 18 to 24":
-        age = "18-24"
-    elif third_res == "older 24":
-        age = "Старше 24"
-    else:
+
+    if user_id not in user_data:
+        start_command(message)
+        return
+    elif user_data[user_id]["holiday"] is None:
+        command_help_with_holiday(message)
+        return
+    elif user_data[user_id]["recipient"] is None:
+        command_help_with_recipient(message)
+        return
+
+    holiday, recipient, age = (user_data[user_id]['holiday'], user_data[user_id]['recipient'],
+                               user_data[user_id]['age'])
+    if user_data[user_id]["age"] is None:
         age = "Определен автоматический"
     bot.send_message(message.chat.id, f"Вы действительно хотите применить эти параметры?\n\n"
                      f"Праздник: ({holiday});\nКому: ({recipient});\nВозраст: ({age})",
@@ -390,37 +407,66 @@ def confirming_message(message):
 
 def generating_gift(message):
     message_text, user_id = message.text, message.from_user.id
+
+    if user_id not in user_data:
+        start_command(message)
+        return
+    elif user_data[user_id]["holiday"] is None:
+        command_help_with_holiday(message)
+        return
+    elif user_data[user_id]["recipient"] is None:
+        command_help_with_recipient(message)
+        return
+
     if message.content_type != "text":
         bot.send_message(message.chat.id, "Я не понял вашего действия, выберите клавиатурную кнопку!")
         bot.register_next_step_handler(message, generating_gift)
         return
+
     if message_text == "Изменить":
+        user_data[user_id] = {
+            'genre': None,
+            'character': None,
+            'setting': None,
+            'additional_info': ''
+        }
+        time.sleep(1)
         start_command(message)
         return
-    if message_text == "Продолжить" or message_text == "Применить":
-        pass
+    if message_text == "Пересоздать" or message_text == "Применить":
+        user_collection[user_id] = [
+            {'role': 'system', 'content': create_system_prompt(user_data, user_id)},
+        ]
+        insert_row(
+            [
+                user_id,
+                'system',
+                create_system_prompt(user_data, user_id),
+                time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+            ]
+        )
     else:
         bot.send_message(message.chat.id, "Я не понял вашего действия, выберите клавиатурную кнопку!")
         return
+
     bot.send_message(message.chat.id, "Ответ генерируется. Пожалуйста, подождите некоторое время",
                      reply_markup=ReplyKeyboardRemove())
-    formatted_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
-    update_row_value(user_id, "timestamp", formatted_time)
-    res, second_res, third_res = (get_data_for_user(user_id)['holiday'],
-                                  get_data_for_user(user_id)['recipient'],
-                                  get_data_for_user(user_id)["age"])
-    update_row_value(user_id, "task", PROMPTS_TEMPLATES[res][second_res][third_res])
-    system_prompt = ("Ты - бот-помощик по рекомендации подарки, и твоя задача — давать короткие и стильные "
-                     "рекомендации по выбору подарка, учитывая современные тренды.")
 
-    dictionary_from_database = get_data_for_user(user_id)
-    promt = gpt.make_promt(dictionary_from_database, system_prompt)
-    resp = gpt.send_request(promt)
-    success, answer = gpt.process_resp(resp)
-    update_row_value(user_id, "answer", answer)
-
-    bot.send_message(message.chat.id, get_data_for_user(user_id)['answer'],
-                     reply_markup=create_markup(["Продолжить", "Завершить", "История запросов"]))
+    assistant_content = ask_gpt(user_collection[user_id])
+    user_collection[user_id].append({'role': 'assistant', 'content': assistant_content})
+    insert_row(
+        [
+            user_id,
+            'assistant',
+            assistant_content,
+            time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+        ]
+    )
+    bot.send_message(message.chat.id, f'Ваш подарок: {assistant_content}',
+                     reply_markup=create_markup(["Пересоздать", "Завершить", "История запросов"]))
+    time.sleep(2)
+    bot.send_message(message.chat.id, 'Для пересоздания ответа нажмите «Пересоздать». Чтобы закончить нажмите '
+                                      '«Завершить»')
 
 
 bot.polling()

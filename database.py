@@ -1,9 +1,6 @@
 import sqlite3
 import logging
-
-DB_DIR = 'db'
-DB_NAME = 'gpt_helper.db'
-DB_TABLE_USERS_NAME = 'users'
+from config import *
 
 
 # Функция для подключения к базе данных или создания новой, если её ещё нет
@@ -47,20 +44,17 @@ def create_table(table_name):
     sql_query = f'CREATE TABLE IF NOT EXISTS {table_name} ' \
                 f'(id INTEGER PRIMARY KEY, ' \
                 f'user_id INTEGER, ' \
-                f'holiday TEXT, ' \
-                f'recipient TEXT, ' \
-                f'age TEXT, ' \
-                f'task TEXT, ' \
-                f'answer TEXT, ' \
-                f'timestamp TEXT)'
+                f'role TEXT, ' \
+                f'content TEXT, ' \
+                f'date TEXT)'
     execute_query(sql_query)
 
 
 # Функция для вывода всей таблицы (для проверки)
 # Создаёт запрос SELECT * FROM имя_таблицы
 def get_all_rows(table_name):
-    quary = f"SELECT * FROM {table_name}"
-    ram = execute_selection_query(quary)
+    sql_query = f"SELECT * FROM {table_name}"
+    ram = execute_selection_query(sql_query)
     return ram
 
 
@@ -74,8 +68,8 @@ def clean_table(table_name):
 # Принимает список значений для каждой колонки и названия колонок
 # Создаёт запрос INSERT INTO имя_таблицы (колонка1, колонка2) VALUES (?, ?)[значение1, значение2]
 def insert_row(values):
-    columns = "(user_id, holiday, recipient, age, task, answer, timestamp)"
-    sq1_query = f"INSERT INTO {DB_TABLE_USERS_NAME} {columns} VALUES (?, ?, ?, ?, ?, ?, ?)"
+    columns = "(user_id, role, content, date)"
+    sq1_query = f"INSERT INTO {DB_TABLE_USERS_NAME} {columns} VALUES (?, ?, ?, ?)"
     execute_query(sq1_query, values)
 
 
@@ -106,14 +100,24 @@ def update_row_value(user_id, column_name, new_value):
 # Функция для получения данных для указанного пользователя
 def get_data_for_user(user_id):
     if is_value_in_table(DB_TABLE_USERS_NAME, "user_id", user_id):
-        sq1_query = (F"SELECT user_id, holiday, recipient, age, task, answer, timestamp FROM {DB_TABLE_USERS_NAME} "
+        sq1_query = (F"SELECT user_id, role, content, date FROM {DB_TABLE_USERS_NAME} "
                      F"WHERE user_id = ? limit 1")
         row = execute_selection_query(sq1_query, [user_id])[0]
-        return {"holiday": row[1], "recipient": row[2], "age": row[3], "task": row[4], "answer": row[5],
-                "timestamp": row[6]}
+        return {"user_id": row[1], "role": row[2], "content": row[3], "date": row[4]}
     else:
         logging.info(f"DATABASE: Пользователь с id = {user_id} не найден")
-        return {"holiday": "", "recipient": "",  "age": "", "task": "", "answer": "", "timestamp": ""}
+        return {"user_id": "", "role": "",  "content": "", "date": ""}
+
+
+def get_history_and_date(user_id):
+    sq1_query = f"SELECT content, date FROM {DB_TABLE_USERS_NAME} WHERE user_id = ? AND role = 'assistant';"
+    rows = execute_selection_query(sq1_query, [user_id])
+
+    history_list = []
+    for row in rows:
+        history_list.append({"content": row[0], "date": row[1]})
+
+    return history_list
 
 
 # Функция для подготовки базы данных
